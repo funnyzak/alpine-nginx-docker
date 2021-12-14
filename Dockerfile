@@ -1,53 +1,46 @@
-FROM nginx:1.19.6-alpine-perl
-LABEL org.label-schema.vendor="potato<silenceace@gmail.com>" \
-    org.label-schema.name="Alpine Nginx" \
-    org.label-schema.build-date="${BUILD_DATE}" \
-    org.label-schema.description="Alpine Nginx." \
-    org.label-schema.url="https://yycc.me" \
-    org.label-schema.schema-version="1.0"	\
-    org.label-schema.vcs-type="Git" \
-    org.label-schema.vcs-ref="${VCS_REF}" \
-    org.label-schema.vcs-url="https://github.com/funnyzak/alpine-nginx-docker" 
+FROM nginx:alpine AS builder
 
-ENV LANG=C.UTF-8
-# Here we install GNU libc (aka glibc) and set C.UTF-8 locale as default.
-RUN ALPINE_GLIBC_BASE_URL="https://github.com/sgerrand/alpine-pkg-glibc/releases/download" && \
-    ALPINE_GLIBC_PACKAGE_VERSION="2.31-r0" && \
-    ALPINE_GLIBC_BASE_PACKAGE_FILENAME="glibc-$ALPINE_GLIBC_PACKAGE_VERSION.apk" && \
-    ALPINE_GLIBC_BIN_PACKAGE_FILENAME="glibc-bin-$ALPINE_GLIBC_PACKAGE_VERSION.apk" && \
-    ALPINE_GLIBC_I18N_PACKAGE_FILENAME="glibc-i18n-$ALPINE_GLIBC_PACKAGE_VERSION.apk" && \
-    apk add --no-cache --virtual=.build-dependencies wget ca-certificates && \
-    echo \
-        "-----BEGIN PUBLIC KEY-----\
-        MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApZ2u1KJKUu/fW4A25y9m\
-        y70AGEa/J3Wi5ibNVGNn1gT1r0VfgeWd0pUybS4UmcHdiNzxJPgoWQhV2SSW1JYu\
-        tOqKZF5QSN6X937PTUpNBjUvLtTQ1ve1fp39uf/lEXPpFpOPL88LKnDBgbh7wkCp\
-        m2KzLVGChf83MS0ShL6G9EQIAUxLm99VpgRjwqTQ/KfzGtpke1wqws4au0Ab4qPY\
-        KXvMLSPLUp7cfulWvhmZSegr5AdhNw5KNizPqCJT8ZrGvgHypXyiFvvAH5YRtSsc\
-        Zvo9GI2e2MaZyo9/lvb+LbLEJZKEQckqRj4P26gmASrZEPStwc+yqy1ShHLA0j6m\
-        1QIDAQAB\
-        -----END PUBLIC KEY-----" | sed 's/   */\n/g' > "/etc/apk/keys/sgerrand.rsa.pub" && \
-        wget \
-            "$ALPINE_GLIBC_BASE_URL/$ALPINE_GLIBC_PACKAGE_VERSION/$ALPINE_GLIBC_BASE_PACKAGE_FILENAME" \
-            "$ALPINE_GLIBC_BASE_URL/$ALPINE_GLIBC_PACKAGE_VERSION/$ALPINE_GLIBC_BIN_PACKAGE_FILENAME" \
-            "$ALPINE_GLIBC_BASE_URL/$ALPINE_GLIBC_PACKAGE_VERSION/$ALPINE_GLIBC_I18N_PACKAGE_FILENAME" && \
-        apk add --no-cache libstdc++ \
-            "$ALPINE_GLIBC_BASE_PACKAGE_FILENAME" \
-            "$ALPINE_GLIBC_BIN_PACKAGE_FILENAME" \
-            "$ALPINE_GLIBC_I18N_PACKAGE_FILENAME" && \
-        rm "/etc/apk/keys/sgerrand.rsa.pub" && \
-        /usr/glibc-compat/bin/localedef --force --inputfile POSIX --charmap UTF-8 "$LANG" || true && \
-        echo "export LANG=$LANG" > /etc/profile.d/locale.sh && \
-        \
-        apk del glibc-i18n && \
-        rm "/root/.wget-hsts" && \
-        apk del .build-dependencies && \
-        rm \
-            "$ALPINE_GLIBC_BASE_PACKAGE_FILENAME" \
-            "$ALPINE_GLIBC_BIN_PACKAGE_FILENAME" \
-            "$ALPINE_GLIBC_I18N_PACKAGE_FILENAME"
+# nginx:alpine contains NGINX_VERSION environment variable, like so:
+# ENV NGINX_VERSION 1.15.0
 
-RUN apk update && apk upgrade && \
-    apk add --no-cache dcron ca-certificates bash curl wget rsync git openssh zip unzip gzip bzip2 tar tzdata mysql-client && \
-    rm  -rf /tmp/* /var/cache/apk/*
+# Our NCHAN version
+ENV NCHAN_VERSION 1.1.15
 
+# Download sources
+RUN wget "http://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" -O nginx.tar.gz && \
+    wget "https://github.com/slact/nchan/archive/v${NCHAN_VERSION}.tar.gz" -O nchan.tar.gz
+
+# For latest build deps, see https://github.com/nginxinc/docker-nginx/blob/master/mainline/alpine/Dockerfile
+RUN apk add --no-cache --virtual .build-deps \
+    gcc \
+    libc-dev \
+    make \
+    openssl-dev \
+    pcre-dev \
+    zlib-dev \
+    linux-headers \
+    curl \
+    gnupg \
+    libxslt-dev \
+    gd-dev \
+    geoip-dev
+
+# Reuse same cli arguments as the nginx:alpine image used to build
+RUN CONFARGS=$(nginx -V 2>&1 | sed -n -e 's/^.*arguments: //p') \
+    tar -zxC /usr/src -f nginx.tar.gz && \
+    tar -xzvf "nchan.tar.gz" && \
+    NCHANDIR="$(pwd)/nchan-${NCHAN_VERSION}" && \
+    cd /usr/src/nginx-$NGINX_VERSION && \
+    ./configure --with-compat $CONFARGS --add-dynamic-module=$NCHANDIR  && \
+    make && make install
+
+FROM nginx:alpine
+# Extract the dynamic module NCHAN from the builder image
+COPY --from=builder /usr/local/nginx/modules/ngx_nchan_module.so /usr/local/nginx/modules/ngx_nchan_module.so
+RUN rm /etc/nginx/conf.d/default.conf
+
+COPY nginx.conf /etc/nginx/nginx.conf
+# COPY default.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80
+STOPSIGNAL SIGTERM
+CMD ["nginx", "-g", "daemon off;"]
